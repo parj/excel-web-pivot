@@ -1,0 +1,49 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_USER: app
+      CLICKHOUSE_PASSWORD: app_secret
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8123:8123"   # HTTP interface (used by clickhouse-connect)
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+
+  backend:
+    build: ./backend
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_USER: app
+      CLICKHOUSE_PASSWORD: app_secret
+      CLICKHOUSE_DATABASE: excel_uploads
+      MAX_UPLOAD_MB: 50
+      MAX_ROWS_PER_SHEET: 1000000
+    ports:
+      - "8000:8000"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_API_PROXY: http://backend:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app           # live-reload source edits in dev
+      - /app/node_modules         # keep image-installed deps, not host's
+    depends_on:
+      - backend
+
+volumes:
+  clickhouse_data:
