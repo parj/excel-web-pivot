@@ -124,30 +124,68 @@ body {
 .pv-tab-x { color: var(--pv-faint); font-size: 11px; cursor: pointer; }
 .pv-tab-x:hover { color: var(--pv-accent); }
 
-/* ---------- pivot config strip ---------- */
-.pv-strip {
-  display: flex; padding: 8px 16px; gap: 14px; border-bottom: 1px solid var(--pv-border);
-  flex-shrink: 0; background: var(--pv-panel); align-items: center; flex-wrap: wrap;
+/* ---------- pivot settings panel (design turn 2: Enhanced Pivot Builder) ---------- */
+.pv-settings { border-bottom: 1px solid var(--pv-border); background: var(--pv-panel); flex-shrink: 0; }
+.pv-settings-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 16px 8px;
 }
+.pv-settings-title { font-size: 11px; font-weight: 600; color: var(--pv-text-2); text-transform: uppercase; letter-spacing: 0.4px; }
+.pv-settings-toggle { font-size: 11px; color: var(--pv-accent); cursor: pointer; font-weight: 500; background: none; border: 0; padding: 0; }
+.pv-settings-toggle:hover { text-decoration: underline; }
+.pv-settings-body { display: flex; flex-direction: column; gap: 8px; padding: 0 16px 12px; }
+.pv-settings-row { display: flex; align-items: flex-start; gap: 8px; }
+.pv-settings-label { width: 68px; flex-shrink: 0; font-size: 11px; font-weight: 600; color: var(--pv-muted); padding-top: 5px; }
+.pv-settings-fields { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pv-rows-stack { display: flex; flex-direction: column; gap: 5px; }
+.pv-rows-line { display: flex; align-items: center; gap: 6px; }
+
 .pv-zone { display: flex; align-items: center; gap: 5px; }
-.pv-zone-label { font-size: 10px; font-weight: 600; color: var(--pv-muted); text-transform: uppercase; letter-spacing: 0.4px; }
-.pv-chip-red {
-  display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px;
-  background: var(--pv-accent-bg); border: 1px solid var(--pv-accent-border); border-radius: 4px;
-  font-size: 11px; color: var(--pv-accent); font-weight: 500; cursor: grab; white-space: nowrap;
+.pv-zone.dragover { outline: 2px dashed var(--pv-accent); outline-offset: 2px; border-radius: 6px; }
+
+/* compound pill: [name][agg ▾][×] or [name][×], segments divided by a hairline */
+.pv-chip-compound {
+  display: inline-flex; align-items: stretch; background: var(--pv-accent); border-radius: 5px;
+  font-size: 11px; color: #fff; font-weight: 500; overflow: hidden; white-space: nowrap; cursor: grab;
 }
-.pv-chip-x { cursor: pointer; opacity: 0.6; font-size: 10px; }
-.pv-chip-x:hover { opacity: 1; }
+.pv-chip-seg { padding: 5px 8px; display: flex; align-items: center; }
+.pv-chip-seg-btn {
+  padding: 5px 6px; background: rgba(255, 255, 255, 0.15); border: 0; color: #fff; cursor: pointer;
+  font: inherit; font-size: 10px; display: flex; align-items: center;
+}
+.pv-chip-seg-btn:hover { background: rgba(255, 255, 255, 0.28); }
+.pv-chip-seg-x {
+  padding: 5px 7px; border-left: 1px solid rgba(255, 255, 255, 0.25); cursor: pointer;
+  font-size: 12px; opacity: 0.85;
+}
+.pv-chip-seg-x:hover { opacity: 1; background: rgba(0, 0, 0, 0.12); }
+
+.pv-add-square {
+  display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 28px;
+  background: var(--pv-accent); color: #fff; border: 0; border-radius: 5px; font-size: 14px;
+  font-weight: 700; cursor: pointer; flex-shrink: 0;
+}
+.pv-add-square:hover { background: var(--pv-accent-strong); }
 .pv-chip-empty {
   padding: 3px 9px; background: transparent; border: 1px solid var(--pv-border-strong); border-radius: 4px;
   font-size: 11px; color: var(--pv-muted);
 }
-.pv-add {
-  padding: 3px 8px; border: 1px dashed var(--pv-border-strong); border-radius: 4px; background: transparent;
-  font-size: 11px; color: var(--pv-text-2); cursor: pointer;
+
+/* ---------- layout toolbar (Collapsible columns / Tree mode / Frozen / Totals / Auto width) ---------- */
+.pv-layout-toolbar {
+  display: flex; align-items: center; gap: 20px; padding: 8px 16px; flex-wrap: wrap;
+  border-top: 1px solid var(--pv-border); flex-shrink: 0;
 }
-.pv-add:hover { border-color: var(--pv-accent); color: var(--pv-accent); }
-.pv-zone.dragover .pv-add { border-color: var(--pv-accent); color: var(--pv-accent); }
+.pv-toggle-row { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.pv-toggle-row.disabled { opacity: 0.45; cursor: not-allowed; }
+.pv-toggle-row-label { font-size: 11px; color: var(--pv-text-2); }
+.pv-toggle { width: 34px; height: 18px; border-radius: 9px; background: var(--pv-border-strong); position: relative; flex-shrink: 0; transition: background 0.15s; }
+.pv-toggle.on { background: var(--pv-accent); }
+.pv-toggle-knob { width: 14px; height: 14px; border-radius: 7px; background: #fff; position: absolute; top: 2px; left: 2px; transition: left 0.15s; }
+.pv-toggle.on .pv-toggle-knob { left: 18px; }
+
+/* ---------- tree-mode row label cell ---------- */
+.pv-tree-toggle { color: var(--pv-accent); font-size: 10px; cursor: pointer; margin-right: 4px; display: inline-block; width: 10px; }
 
 /* ---------- toolbar / status ---------- */
 .pv-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; flex-shrink: 0; }

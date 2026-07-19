@@ -1,5 +1,5 @@
 import { Checkbox, Loader, Menu, Popover, ScrollArea, TextInput, useComputedColorScheme } from '@mantine/core';
-import type { ColDef, ColGroupDef } from 'ag-grid-community';
+import type { CellClickedEvent, ColDef, ColGroupDef } from 'ag-grid-community';
 import { AgGridReact } from 'ag-grid-react';
 import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 
@@ -8,6 +8,7 @@ import {
   type ColumnMeta,
   type PivotConfig,
   type PivotResult,
+  type PivotTreeNode,
   type SaveState,
   type Sheet,
   type ValueField,
@@ -15,13 +16,15 @@ import {
 import { SaveBadge } from './SaveBadge';
 
 const AGG_OPTIONS: { value: ValueField['agg']; label: string; short: string }[] = [
-  { value: 'sum', label: 'Sum', short: 'SUM' },
-  { value: 'count', label: 'Count', short: 'COUNT' },
-  { value: 'avg', label: 'Average', short: 'AVG' },
-  { value: 'min', label: 'Min', short: 'MIN' },
-  { value: 'max', label: 'Max', short: 'MAX' },
-  { value: 'distinct_count', label: 'Distinct Count', short: 'UNIQ' },
+  { value: 'sum', label: 'Sum', short: 'Sum' },
+  { value: 'count', label: 'Count', short: 'Count' },
+  { value: 'avg', label: 'Average', short: 'Avg' },
+  { value: 'min', label: 'Min', short: 'Min' },
+  { value: 'max', label: 'Max', short: 'Max' },
+  { value: 'distinct_count', label: 'Distinct Count', short: 'Distinct' },
 ];
+const ROW_INDENT = 30;
+const TREE_INDENT = 18;
 
 type ZoneId = 'rows' | 'columns' | 'values' | 'filters';
 interface DragPayload {
@@ -41,22 +44,45 @@ const fmt = (v: number | string | null | undefined) =>
       ? v.toLocaleString(undefined, { maximumFractionDigits: 2 })
       : String(v);
 
-/** One labelled zone in the config strip: ROWS [chip] [chip] [+] */
+function AddFieldMenu({
+  columns,
+  exclude,
+  onPick,
+}: {
+  columns: ColumnMeta[];
+  exclude: string[];
+  onPick: (field: string) => void;
+}) {
+  const available = columns.filter((c) => !exclude.includes(c.name));
+  if (available.length === 0) return null;
+  return (
+    <Menu position="bottom-start" withArrow>
+      <Menu.Target>
+        <button className="pv-add-square">+</button>
+      </Menu.Target>
+      <Menu.Dropdown>
+        {available.map((c) => (
+          <Menu.Item key={c.name} onClick={() => onPick(c.name)}>
+            {c.source}
+          </Menu.Item>
+        ))}
+      </Menu.Dropdown>
+    </Menu>
+  );
+}
+
+/** A settings-row drop target: ROWS/COLUMNS/VALUES/FILTER accept dragged chips. */
 function Zone({
-  label,
   onDropField,
   children,
-  addMenu,
 }: {
-  label: string;
   onDropField: (p: DragPayload) => void;
   children: ReactNode;
-  addMenu: ReactNode;
 }) {
   const [over, setOver] = useState(false);
   return (
     <div
-      className={`pv-zone${over ? ' dragover' : ''}`}
+      className={`pv-settings-fields pv-zone${over ? ' dragover' : ''}`}
       onDragOver={(e) => {
         e.preventDefault();
         setOver(true);
@@ -72,29 +98,33 @@ function Zone({
         }
       }}
     >
-      <span className="pv-zone-label">{label}</span>
       {children}
-      {addMenu}
     </div>
   );
 }
 
-function AddFieldMenu({ columns, exclude, onPick }: { columns: ColumnMeta[]; exclude: string[]; onPick: (field: string) => void }) {
-  const available = columns.filter((c) => !exclude.includes(c.name));
-  if (available.length === 0) return null;
+function ToggleRow({
+  label,
+  checked,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+}) {
   return (
-    <Menu position="bottom-start" withArrow>
-      <Menu.Target>
-        <button className="pv-add">+</button>
-      </Menu.Target>
-      <Menu.Dropdown>
-        {available.map((c) => (
-          <Menu.Item key={c.name} onClick={() => onPick(c.name)}>
-            {c.source}
-          </Menu.Item>
-        ))}
-      </Menu.Dropdown>
-    </Menu>
+    <div
+      className={`pv-toggle-row${disabled ? ' disabled' : ''}`}
+      onClick={() => !disabled && onChange(!checked)}
+      title={disabled ? 'Needs 2+ row fields' : undefined}
+    >
+      <span className="pv-toggle-row-label">{label}</span>
+      <span className={`pv-toggle${checked ? ' on' : ''}`}>
+        <span className="pv-toggle-knob" />
+      </span>
+    </div>
   );
 }
 
@@ -108,12 +138,21 @@ export function PivotView({
   onRenamed?: (name: string) => void;
 }) {
   const scheme = useComputedColorScheme('light');
+  const gridRef = useRef<AgGridReact>(null);
   const [cfg, setCfg] = useState<PivotConfig | null>(null);
   const [result, setResult] = useState<PivotResult | null>(null);
   const [save, setSave] = useState<SaveState>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
   const loaded = useRef(false);
   const debounce = useRef<number | null>(null);
+
+  const [settingsOpen, setSettingsOpen] = useState(true);
+  const [collapsibleColumns, setCollapsibleColumns] = useState(true);
+  const [treeMode, setTreeMode] = useState(true);
+  const [frozenFirstColumn, setFrozenFirstColumn] = useState(true);
+  const [showTotals, setShowTotals] = useState(true);
+  const [autoWidth, setAutoWidth] = useState(false);
+  const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(new Set());
 
   const colByName = useMemo(() => {
     const m: Record<string, ColumnMeta> = {};
@@ -153,6 +192,7 @@ export function PivotView({
         await api.updatePivot(pivotId, cfg);
         const { result } = await api.runPivot(pivotId);
         setResult(result);
+        setCollapsedPaths(new Set());
         setSave('saved');
         onRenamed?.(cfg.name);
         window.setTimeout(() => setSave((s) => (s === 'saved' ? 'idle' : s)), 2000);
@@ -191,18 +231,54 @@ export function PivotView({
     });
   };
 
+  const treeEligible = (cfg?.rows.length ?? 0) >= 2 && !!result?.rowTree;
+  const treeActive = treeEligible && treeMode;
+
   // ----- result grid -----
   const { columnDefs, rowData, pinnedBottom } = useMemo(() => {
     if (!result) return { columnDefs: [] as (ColDef | ColGroupDef)[], rowData: [], pinnedBottom: [] };
 
-    const defs: (ColDef | ColGroupDef)[] = result.rowFields.map((rf, i) => ({
-      field: `__r${i}`,
-      headerName: rf.label,
-      pinned: 'left',
-      cellStyle: { fontWeight: 500 },
-    }));
-    if (result.rowFields.length === 0) {
-      defs.push({ field: '__r0', headerName: '', pinned: 'left', width: 90 });
+    const cellsToRow = (cells: (number | string | null)[][], total: (number | null)[]) => {
+      const row: Record<string, unknown> = {};
+      cells.forEach((cell, ci) => cell?.forEach((val, vi) => (row[`c${ci}_v${vi}`] = val)));
+      total.forEach((t, vi) => (row[`t_v${vi}`] = t));
+      return row;
+    };
+
+    // --- label column(s): tree mode gets one custom column, flat mode gets one per row field ---
+    const defs: (ColDef | ColGroupDef)[] = [];
+    if (treeActive) {
+      defs.push({
+        field: '__label',
+        headerName: result.rowFields.map((f) => f.label).join(' / '),
+        pinned: frozenFirstColumn ? 'left' : undefined,
+        minWidth: 200,
+        // A plain function passed as cellRenderer is invoked by ag-grid-react
+        // as a React function component, so this must return JSX — an HTML
+        // string here would be escaped and shown as literal text.
+        cellRenderer: (p: { data: Record<string, unknown> }) => {
+          const isGroup = p.data.__isGroup as boolean;
+          const path = p.data.__path as string;
+          const indent = p.data.__indent as number;
+          return (
+            <span style={{ paddingLeft: indent, fontWeight: isGroup ? 600 : 500 }}>
+              {isGroup && <span className="pv-tree-toggle">{collapsedPaths.has(path) ? '▸' : '▼'}</span>}
+              {p.data.__label as string}
+            </span>
+          );
+        },
+      });
+    } else if (result.rowFields.length > 0) {
+      result.rowFields.forEach((rf, i) =>
+        defs.push({
+          field: `__r${i}`,
+          headerName: rf.label,
+          pinned: frozenFirstColumn ? 'left' : undefined,
+          cellStyle: { fontWeight: 500 },
+        })
+      );
+    } else {
+      defs.push({ field: '__r0', headerName: '', pinned: frozenFirstColumn ? 'left' : undefined, width: 90 });
     }
 
     const numCol = (field: string, headerName: string, bold = false): ColDef => ({
@@ -216,36 +292,86 @@ export function PivotView({
 
     result.columnKeys.forEach((ck, ci) => {
       const children: ColDef[] = result.values.map((v, vi) => numCol(`c${ci}_v${vi}`, v.label));
-      if (ck.length > 0) {
-        defs.push({ headerName: ck.join(' / '), children });
-      } else {
+      if (ck.length === 0) {
         defs.push(...children);
+      } else if (collapsibleColumns) {
+        defs.push({ headerName: ck.join(' / '), groupId: `grp${ci}`, children });
+      } else {
+        // Flattened: one column per (column-key, value) combo, no group header row.
+        defs.push(
+          ...result.values.map((v, vi) => numCol(`c${ci}_v${vi}`, `${ck.join(' / ')} · ${v.label}`))
+        );
       }
     });
 
-    if (result.colFields.length > 0 && result.values.some((v) => ['sum', 'count'].includes(v.agg))) {
-      defs.push({
-        headerName: 'Total',
-        children: result.values.map((v, vi) => numCol(`t_v${vi}`, v.label, true)),
+    if (result.colFields.length > 0) {
+      const totalChildren = result.values.map((v, vi) => numCol(`t_v${vi}`, v.label, true));
+      if (collapsibleColumns) {
+        defs.push({ headerName: 'Total', groupId: 'grpTotal', children: totalChildren });
+      } else {
+        defs.push(...result.values.map((v, vi) => numCol(`t_v${vi}`, `Total · ${v.label}`, true)));
+      }
+    }
+
+    let rowData: Record<string, unknown>[];
+    if (treeActive && result.rowTree) {
+      rowData = [];
+      const walk = (node: PivotTreeNode) => {
+        const path = node.keys.join('␟');
+        rowData.push({
+          __label: node.keys[node.keys.length - 1],
+          __indent: (node.level - 1) * TREE_INDENT,
+          __isGroup: !node.isLeaf,
+          __path: path,
+          ...cellsToRow(node.cells, node.total),
+        });
+        if (!node.isLeaf && !collapsedPaths.has(path)) {
+          node.children!.forEach(walk);
+        }
+      };
+      result.rowTree.forEach(walk);
+    } else {
+      rowData = result.rows.map((r) => {
+        const row: Record<string, unknown> = {};
+        r.keys.forEach((k, i) => (row[`__r${i}`] = k));
+        return { ...row, ...cellsToRow(r.cells, r.total) };
       });
     }
 
-    const toRow = (keys: string[], cells: (number | string | null)[][], total: (number | null)[]) => {
-      const row: Record<string, unknown> = {};
-      keys.forEach((k, i) => (row[`__r${i}`] = k));
-      cells.forEach((cell, ci) => cell?.forEach((val, vi) => (row[`c${ci}_v${vi}`] = val)));
-      total.forEach((t, vi) => (row[`t_v${vi}`] = t));
-      return row;
-    };
+    let pinnedBottom: Record<string, unknown>[] = [];
+    if (showTotals && result.rows.length > 0) {
+      const grand = cellsToRow(result.grandTotal.cells, result.grandTotal.total);
+      if (treeActive) {
+        pinnedBottom = [{ __label: 'Grand Total', __indent: 0, __isGroup: false, __path: '', ...grand }];
+      } else {
+        const keys = result.rowFields.length ? ['Grand Total', ...Array(result.rowFields.length - 1).fill('')] : ['Grand Total'];
+        const row: Record<string, unknown> = {};
+        keys.forEach((k, i) => (row[`__r${i}`] = k));
+        pinnedBottom = [{ ...row, ...grand }];
+      }
+    }
 
-    const rowData = result.rows.map((r) => toRow(r.keys, r.cells, r.total));
-    const grand = toRow(
-      result.rowFields.length ? ['Grand Total', ...Array(result.rowFields.length - 1).fill('')] : ['Grand Total'],
-      result.grandTotal.cells,
-      result.grandTotal.total
-    );
-    return { columnDefs: defs, rowData, pinnedBottom: result.rows.length > 0 ? [grand] : [] };
-  }, [result]);
+    return { columnDefs: defs, rowData, pinnedBottom };
+  }, [result, treeActive, collapsedPaths, collapsibleColumns, frozenFirstColumn, showTotals]);
+
+  useEffect(() => {
+    if (!gridRef.current?.api) return;
+    if (autoWidth) gridRef.current.api.autoSizeAllColumns();
+    else gridRef.current.api.sizeColumnsToFit();
+  }, [autoWidth, columnDefs]);
+
+  const onCellClicked = (e: CellClickedEvent) => {
+    if (e.colDef.field !== '__label') return;
+    const data = e.data as Record<string, unknown>;
+    if (!data.__isGroup) return;
+    const path = data.__path as string;
+    setCollapsedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
 
   // ----- inline chart: first value by row keys (design 1a) -----
   const chart = useMemo(() => {
@@ -276,15 +402,22 @@ export function PivotView({
     );
   }
 
-  const chip = (zone: ZoneId, field: string, text: string, extra?: ReactNode) => (
-    <span key={field} className="pv-chip-red" draggable onDragStart={(e) => setDrag(e, { field, from: zone })}>
-      {text}
-      {extra}
-      <span
-        className="pv-chip-x"
-        title="Remove"
-        onClick={() => setCfg((c) => (c ? removeFrom(c, zone, field) : c))}
-      >
+  const compoundChip = (
+    zone: ZoneId,
+    field: string,
+    nameText: string,
+    onRemove: () => void,
+    middle?: ReactNode
+  ) => (
+    <span
+      key={field}
+      className="pv-chip-compound"
+      draggable
+      onDragStart={(e) => setDrag(e, { field, from: zone })}
+    >
+      <span className="pv-chip-seg">{nameText}</span>
+      {middle}
+      <span className="pv-chip-seg-x" title="Remove" onClick={onRemove}>
         ✕
       </span>
     </span>
@@ -292,118 +425,157 @@ export function PivotView({
 
   return (
     <>
-      {/* pivot config strip (design 1a) */}
-      <div className="pv-strip">
-        <Zone
-          label="Rows"
-          onDropField={dropInto('rows')}
-          addMenu={<AddFieldMenu columns={sheet.columns} exclude={cfg.rows} onPick={(f) => dropInto('rows')({ field: f, from: 'list' })} />}
-        >
-          {cfg.rows.map((f) => chip('rows', f, label(f)))}
-          {cfg.rows.length === 0 && <span className="pv-chip-empty">None</span>}
-        </Zone>
-        <Zone
-          label="Columns"
-          onDropField={dropInto('columns')}
-          addMenu={<AddFieldMenu columns={sheet.columns} exclude={cfg.columns} onPick={(f) => dropInto('columns')({ field: f, from: 'list' })} />}
-        >
-          {cfg.columns.map((f) => chip('columns', f, label(f)))}
-          {cfg.columns.length === 0 && <span className="pv-chip-empty">None</span>}
-        </Zone>
-        <Zone
-          label="Values"
-          onDropField={dropInto('values')}
-          addMenu={
-            <AddFieldMenu
-              columns={sheet.columns}
-              exclude={cfg.values.map((v) => v.field)}
-              onPick={(f) => dropInto('values')({ field: f, from: 'list' })}
+      {/* Pivot Settings panel (design turn 2: Enhanced Pivot Builder) */}
+      <div className="pv-settings">
+        <div className="pv-settings-head">
+          <span className="pv-settings-title">Pivot Settings</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {result?.truncated && (
+              <span className="pv-chip-empty" style={{ color: 'var(--pv-accent)' }}>
+                Result truncated
+              </span>
+            )}
+            <SaveBadge state={save} error={saveError} />
+            <TextInput
+              size="xs"
+              value={cfg.name}
+              onChange={(e) => update({ name: e.currentTarget.value })}
+              w={140}
+              title="Pivot name"
             />
-          }
-        >
-          {cfg.values.map((v) => (
-            <Menu key={v.field} position="bottom-start" withArrow>
-              <Menu.Target>
-                <span
-                  className="pv-chip-red"
-                  style={{ cursor: 'pointer' }}
-                  draggable
-                  onDragStart={(e) => setDrag(e, { field: v.field, from: 'values' })}
-                >
-                  {label(v.field)} · {AGG_OPTIONS.find((a) => a.value === v.agg)?.short}
-                  <span
-                    className="pv-chip-x"
-                    title="Remove"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setCfg((c) => (c ? removeFrom(c, 'values', v.field) : c));
-                    }}
-                  >
-                    ✕
-                  </span>
-                </span>
-              </Menu.Target>
-              <Menu.Dropdown>
-                {AGG_OPTIONS.map((a) => (
-                  <Menu.Item
-                    key={a.value}
-                    fw={a.value === v.agg ? 700 : 400}
-                    onClick={() =>
-                      update({
-                        values: cfg.values.map((x) => (x.field === v.field ? { ...x, agg: a.value } : x)),
-                      })
-                    }
-                  >
-                    {a.label}
-                  </Menu.Item>
-                ))}
-              </Menu.Dropdown>
-            </Menu>
-          ))}
-          {cfg.values.length === 0 && <span className="pv-chip-empty">None</span>}
-        </Zone>
-        <Zone
-          label="Filter"
-          onDropField={dropInto('filters')}
-          addMenu={
-            <AddFieldMenu
-              columns={sheet.columns}
-              exclude={cfg.filters.map((f) => f.field)}
-              onPick={(f) => dropInto('filters')({ field: f, from: 'list' })}
-            />
-          }
-        >
-          {cfg.filters.map((f) => (
-            <FilterChip
-              key={f.field}
-              sheet={sheet}
-              field={f.field}
-              labelText={label(f.field)}
-              selected={f.values}
-              onChange={(values) =>
-                update({ filters: cfg.filters.map((x) => (x.field === f.field ? { ...x, values } : x)) })
-              }
-              onRemove={() => update({ filters: cfg.filters.filter((x) => x.field !== f.field) })}
-            />
-          ))}
-          {cfg.filters.length === 0 && <span className="pv-chip-empty">None</span>}
-        </Zone>
-
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-          {result?.truncated && (
-            <span className="pv-chip-empty" style={{ color: 'var(--pv-accent)' }}>
-              Result truncated
-            </span>
-          )}
-          <SaveBadge state={save} error={saveError} />
-          <TextInput
-            size="xs"
-            value={cfg.name}
-            onChange={(e) => update({ name: e.currentTarget.value })}
-            w={140}
-            title="Pivot name"
-          />
+            <button className="pv-settings-toggle" onClick={() => setSettingsOpen((o) => !o)}>
+              {settingsOpen ? 'Hide settings' : 'Show settings'}
+            </button>
+          </div>
         </div>
+
+        {settingsOpen && (
+          <div className="pv-settings-body">
+            <div className="pv-settings-row">
+              <span className="pv-settings-label">Values</span>
+              <Zone onDropField={dropInto('values')}>
+                <AddFieldMenu
+                  columns={sheet.columns}
+                  exclude={cfg.values.map((v) => v.field)}
+                  onPick={(f) => dropInto('values')({ field: f, from: 'list' })}
+                />
+                {cfg.values.map((v) =>
+                  compoundChip(
+                    'values',
+                    v.field,
+                    label(v.field),
+                    () => setCfg((c) => (c ? removeFrom(c, 'values', v.field) : c)),
+                    <Menu position="bottom-start" withArrow>
+                      <Menu.Target>
+                        <button
+                          className="pv-chip-seg-btn"
+                          style={{ borderLeft: '1px solid rgba(255,255,255,0.2)' }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {AGG_OPTIONS.find((a) => a.value === v.agg)?.short} ▾
+                        </button>
+                      </Menu.Target>
+                      <Menu.Dropdown>
+                        {AGG_OPTIONS.map((a) => (
+                          <Menu.Item
+                            key={a.value}
+                            fw={a.value === v.agg ? 700 : 400}
+                            onClick={() =>
+                              update({
+                                values: cfg.values.map((x) => (x.field === v.field ? { ...x, agg: a.value } : x)),
+                              })
+                            }
+                          >
+                            {a.label}
+                          </Menu.Item>
+                        ))}
+                      </Menu.Dropdown>
+                    </Menu>
+                  )
+                )}
+                {cfg.values.length === 0 && <span className="pv-chip-empty">None</span>}
+              </Zone>
+            </div>
+
+            <div className="pv-settings-row">
+              <span className="pv-settings-label">Columns</span>
+              <Zone onDropField={dropInto('columns')}>
+                <AddFieldMenu
+                  columns={sheet.columns}
+                  exclude={cfg.columns}
+                  onPick={(f) => dropInto('columns')({ field: f, from: 'list' })}
+                />
+                {cfg.columns.map((f) =>
+                  compoundChip('columns', f, label(f), () => update({ columns: cfg.columns.filter((x) => x !== f) }))
+                )}
+                {cfg.columns.length === 0 && <span className="pv-chip-empty">None</span>}
+              </Zone>
+            </div>
+
+            <div className="pv-settings-row">
+              <span className="pv-settings-label">Rows</span>
+              <Zone onDropField={dropInto('rows')}>
+                <div className="pv-rows-stack" style={{ width: '100%' }}>
+                  {cfg.rows.map((f, i) => (
+                    <div className="pv-rows-line" key={f} style={{ paddingLeft: i * ROW_INDENT }}>
+                      {i === 0 && (
+                        <AddFieldMenu
+                          columns={sheet.columns}
+                          exclude={cfg.rows}
+                          onPick={(field) => dropInto('rows')({ field, from: 'list' })}
+                        />
+                      )}
+                      {compoundChip('rows', f, label(f), () => update({ rows: cfg.rows.filter((x) => x !== f) }))}
+                    </div>
+                  ))}
+                  <div className="pv-rows-line" style={{ paddingLeft: cfg.rows.length * ROW_INDENT }}>
+                    {cfg.rows.length === 0 ? (
+                      <>
+                        <AddFieldMenu
+                          columns={sheet.columns}
+                          exclude={cfg.rows}
+                          onPick={(field) => dropInto('rows')({ field, from: 'list' })}
+                        />
+                        <span className="pv-chip-empty">None</span>
+                      </>
+                    ) : (
+                      <AddFieldMenu
+                        columns={sheet.columns}
+                        exclude={cfg.rows}
+                        onPick={(field) => dropInto('rows')({ field, from: 'list' })}
+                      />
+                    )}
+                  </div>
+                </div>
+              </Zone>
+            </div>
+
+            <div className="pv-settings-row">
+              <span className="pv-settings-label">Filter</span>
+              <Zone onDropField={dropInto('filters')}>
+                <AddFieldMenu
+                  columns={sheet.columns}
+                  exclude={cfg.filters.map((f) => f.field)}
+                  onPick={(f) => dropInto('filters')({ field: f, from: 'list' })}
+                />
+                {cfg.filters.map((f) => (
+                  <FilterChip
+                    key={f.field}
+                    sheet={sheet}
+                    field={f.field}
+                    labelText={label(f.field)}
+                    selected={f.values}
+                    onChange={(values) =>
+                      update({ filters: cfg.filters.map((x) => (x.field === f.field ? { ...x, values } : x)) })
+                    }
+                    onRemove={() => update({ filters: cfg.filters.filter((x) => x.field !== f.field) })}
+                  />
+                ))}
+                {cfg.filters.length === 0 && <span className="pv-chip-empty">None</span>}
+              </Zone>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* result grid */}
@@ -412,13 +584,29 @@ export function PivotView({
         style={{ flex: 1, minHeight: 0, margin: '8px 16px' }}
       >
         <AgGridReact
+          ref={gridRef}
           columnDefs={columnDefs}
           rowData={rowData}
           pinnedBottomRowData={pinnedBottom}
           rowHeight={30}
           headerHeight={30}
+          onCellClicked={onCellClicked}
           defaultColDef={{ resizable: true, minWidth: 90 }}
         />
+      </div>
+
+      {/* layout toolbar (design turn 2) */}
+      <div className="pv-layout-toolbar">
+        <ToggleRow label="Collapsible columns" checked={collapsibleColumns} onChange={setCollapsibleColumns} />
+        <ToggleRow
+          label="Tree mode"
+          checked={treeMode}
+          onChange={setTreeMode}
+          disabled={!treeEligible}
+        />
+        <ToggleRow label="Frozen column" checked={frozenFirstColumn} onChange={setFrozenFirstColumn} />
+        <ToggleRow label="Totals" checked={showTotals} onChange={setShowTotals} />
+        <ToggleRow label="Auto width" checked={autoWidth} onChange={setAutoWidth} />
       </div>
 
       {/* inline chart (design 1a) */}
@@ -474,16 +662,17 @@ function FilterChip({
     <Popover opened={opened} onChange={setOpened} position="bottom-start" withArrow>
       <Popover.Target>
         <span
-          className="pv-chip-red"
-          style={{ cursor: 'pointer' }}
+          className="pv-chip-compound"
           draggable
           onDragStart={(e) => setDrag(e, { field, from: 'filters' })}
           onClick={() => setOpened((o) => !o)}
         >
-          {labelText}
-          {selected.length > 0 ? ` (${selected.length})` : ''}
+          <span className="pv-chip-seg">
+            {labelText}
+            {selected.length > 0 ? ` (${selected.length})` : ''}
+          </span>
           <span
-            className="pv-chip-x"
+            className="pv-chip-seg-x"
             title="Remove"
             onClick={(e) => {
               e.stopPropagation();

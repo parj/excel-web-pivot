@@ -88,6 +88,24 @@ The sample's "Sales" sheet has a merged two-row header (`Revenue` spanning
 `Units`/`Amount`) to show header flattening — it ingests as columns
 `Revenue - Units` and `Revenue - Amount`.
 
+### Excel pivot tables are recreated, not flattened
+
+If the workbook contains PivotTables, they are detected during ingestion and
+**recreated as live pivots** on their source data instead of being imported as
+static tables:
+
+- The pivot definition (row/column fields, values with their aggregations,
+  page filters) is read from the workbook XML; the source range is resolved
+  whether it's a direct sheet reference or a named range.
+- Excel aggregations map to Sum / Count / Average / Min / Max; anything
+  exotic (StdDev, Product, …) falls back to Sum with a warning.
+- A sheet that contains only rendered pivot output is skipped as a table —
+  its pivots appear as tabs under the *source* sheet, live and editable. If a
+  pivot can't be recreated (source data missing from the workbook, external
+  data model), the rendered output is imported as a normal table instead, so
+  nothing is lost. Either way the upload card tells you what happened.
+- `.xls` (legacy BIFF) pivots aren't detected — only `.xlsx`.
+
 ### View and edit a table
 
 Pick a sheet chip in the breadcrumb, then the **Raw Data** tab:

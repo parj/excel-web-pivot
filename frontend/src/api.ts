@@ -42,12 +42,23 @@ export interface PivotConfig {
   filters: FilterField[];
 }
 
+export interface PivotTreeNode {
+  keys: string[];
+  level: number;
+  isLeaf: boolean;
+  cells: (number | string | null)[][];
+  total: (number | null)[];
+  children?: PivotTreeNode[];
+}
+
 export interface PivotResult {
   rowFields: { field: string; label: string }[];
   colFields: { field: string; label: string }[];
   values: { field: string; agg: string; label: string }[];
   columnKeys: string[][];
   rows: { keys: string[]; cells: (number | string | null)[][]; total: (number | null)[] }[];
+  /** Present only when there are 2+ row fields — hierarchical subtotals for tree mode. */
+  rowTree: PivotTreeNode[] | null;
   grandTotal: { cells: (number | null)[][]; total: (number | null)[] };
   truncated: boolean;
 }
