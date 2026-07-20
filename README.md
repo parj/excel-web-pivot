@@ -1,12 +1,13 @@
 # PivotView
 
 An online replacement for Excel tables and pivot tables, backed by ClickHouse.
-Upload `.xlsx`/`.xls` workbooks; every sheet becomes a ClickHouse table you can
-edit in a grid and pivot with an Excel-style field configurator. All edits and
-pivot configurations persist to ClickHouse and survive reloads.
+Upload `.xlsx`/`.xlsm`/`.xls`/`.xlsb` workbooks; every sheet becomes a
+ClickHouse table you can edit in a grid and pivot with an Excel-style field
+configurator. All edits and pivot configurations persist to ClickHouse and
+survive reloads.
 
 **Stack:** React + TypeScript + Mantine + AG Grid Community · Python + FastAPI ·
-ClickHouse via `clickhouse-connect` · pandas + openpyxl for parsing.
+ClickHouse via `clickhouse-connect` · pandas + openpyxl + [xlsb_reader](https://github.com/parj/xslb_reader) for parsing.
 
 **Design:** implements the "PivotView" design direction (option 1a, sidebar
 navigator) from the claude.ai/design project *Excel to web viewer* —
@@ -71,9 +72,9 @@ docker exec -it excel-pivot-clickhouse-1 clickhouse-client -q "SHOW TABLES FROM 
 
 ### Upload a spreadsheet
 
-1. Click the red **Upload .xlsx** button in the top bar, or drag an
-   `.xlsx`/`.xls` file anywhere onto the window. Try the included sample:
-   [sample_data/sales_sample.xlsx](sample_data/sales_sample.xlsx).
+1. Click the red **Upload** button in the top bar, or drag a
+   `.xlsx`/`.xlsm`/`.xls`/`.xlsb` file anywhere onto the window. Try the
+   included sample: [sample_data/sales_sample.xlsx](sample_data/sales_sample.xlsx).
 2. A progress card shows at the bottom of the sidebar while the file uploads
    and ingests (it runs as a background job; big files keep the UI
    responsive). Errors — oversized, corrupt, or password-protected files —
@@ -104,7 +105,11 @@ static tables:
   pivot can't be recreated (source data missing from the workbook, external
   data model), the rendered output is imported as a normal table instead, so
   nothing is lost. Either way the upload card tells you what happened.
-- `.xls` (legacy BIFF) pivots aren't detected — only `.xlsx`.
+- `.xls` (legacy BIFF) pivots aren't detected. `.xlsb` pivots *are* detected
+  (so the render-only sheet heuristic above still applies) but aren't
+  recreated as live configs yet — the underlying data is still imported as a
+  normal table, with a warning. Only `.xlsx`/`.xlsm` pivots get the full
+  live-recreation treatment.
 
 ### View and edit a table
 
@@ -197,16 +202,24 @@ also applies it idempotently at startup, so no manual migration step is needed.
 
 Every upload runs as a background job: `POST /api/uploads` returns `202` with
 a `job_id`, and the UI polls `GET /api/jobs/{job_id}`. Parsing uses openpyxl
-directly for `.xlsx` so merged cells can be filled with their top-left value
-before header detection (`.xls` goes through pandas/xlrd). Multi-row headers
+directly for `.xlsx`/`.xlsm` so merged cells can be filled with their
+top-left value before header detection (`.xls` goes through pandas/xlrd;
+`.xlsb` — the binary OOXML variant openpyxl can't open — goes through
+[xlsb_reader](https://github.com/parj/xslb_reader)). Multi-row headers
 are detected as the leading run of text-only rows (capped at 3) and flattened
 into single names joined by `" - "`; empty/merged cells become `NULL`. Types
 are inferred per column (string / number / date / bool) and mapped to
 `Nullable(Float64/DateTime64(3)/UInt8/String)`.
 
+`.xlsb` has weaker fidelity than the other formats since xlsb_reader is a
+lightweight, dependency-free binary parser: merged cells aren't detected (so
+merged headers aren't filled before flattening) and date cells come back as
+raw Excel serial numbers rather than dates (they'll infer as a `number`
+column) — reformat them client-side after upload if needed.
+
 Clear error states are returned for oversized (413), corrupt, wrong-format,
-and password-protected files (encrypted `.xlsx` is detected by its CFB
-signature).
+and password-protected files (encrypted `.xlsx`/`.xlsm`/`.xlsb` is detected by
+its CFB signature).
 
 ### Pivots
 

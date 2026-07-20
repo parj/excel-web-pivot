@@ -8,7 +8,8 @@ CREATE DATABASE IF NOT EXISTS excel_uploads;
 CREATE TABLE IF NOT EXISTS excel_uploads.workbooks (
     id String,
     filename String,
-    uploaded_at DateTime DEFAULT now()
+    uploaded_at DateTime DEFAULT now(),
+    refreshed_at Nullable(DateTime)
 ) ENGINE = MergeTree ORDER BY id;
 
 CREATE TABLE IF NOT EXISTS excel_uploads.sheets (

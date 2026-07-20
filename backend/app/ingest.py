@@ -1,7 +1,14 @@
 """Excel parsing → schema inference → ClickHouse table creation + insert.
 
-- .xlsx sheets are read via openpyxl so merged cells can be filled with their
-  top-left value before header detection; .xls falls back to pandas/xlrd.
+- .xlsx/.xlsm sheets are read via openpyxl so merged cells can be filled with
+  their top-left value before header detection; .xls falls back to
+  pandas/xlrd; .xlsb (the binary OOXML variant openpyxl can't open) is read
+  via the xlsb_reader package.
+- .xlsb has weaker fidelity than the other formats: xlsb_reader doesn't
+  expose merged-cell ranges (so merged headers aren't filled) or pivot cache
+  field names (so pivots are detected but not recreated as live configs —
+  the underlying sheet is still imported as a table), and date cells come
+  back as raw Excel serial numbers rather than datetimes.
 - Multi-row headers are detected heuristically (leading rows that contain only
   text) and flattened into single names joined by " - ".
 - Each sheet becomes a ReplacingMergeTree(_version) table keyed on _row_id;
@@ -12,7 +19,9 @@ from __future__ import annotations
 import datetime as dt
 import io
 import json
+import os
 import re
+import tempfile
 import time
 import uuid
 import zipfile
@@ -20,6 +29,7 @@ import zipfile
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
+from xlsb_reader import XlsbWorkbook
 
 from .config import settings
 from .db import DB, ch
@@ -41,15 +51,16 @@ class IngestError(Exception):
 def check_file(filename: str, data: bytes):
     if len(data) > settings.max_upload_mb * 1024 * 1024:
         raise IngestError(f"File exceeds the {settings.max_upload_mb}MB limit")
-    if not re.search(r"\.(xlsx|xls)$", filename, re.I):
-        raise IngestError("Only .xlsx and .xls files are supported")
-    # Encrypted OOXML files are wrapped in a CFB container (D0 CF 11 E0). A
-    # plain .xls is also CFB, so only flag it for .xlsx names.
-    if filename.lower().endswith(".xlsx"):
+    if not re.search(r"\.(xlsx|xlsm|xls|xlsb)$", filename, re.I):
+        raise IngestError("Only .xlsx, .xlsm, .xls, and .xlsb files are supported")
+    # Encrypted OOXML files (including .xlsb, which is a zip/OPC container
+    # too) are wrapped in a CFB container (D0 CF 11 E0). A plain .xls is also
+    # CFB, so only flag it for the zip-based extensions.
+    if re.search(r"\.(xlsx|xlsm|xlsb)$", filename, re.I):
         if data[:4] == b"\xd0\xcf\x11\xe0":
             raise IngestError("This file appears to be password-protected; remove the password and re-upload")
         if not zipfile.is_zipfile(io.BytesIO(data)):
-            raise IngestError("File is not a valid .xlsx workbook (corrupt or wrong format)")
+            raise IngestError("File is not a valid workbook (corrupt or wrong format)")
 
 
 def _grids_from_wb(wb) -> dict[str, list[list]]:
@@ -72,6 +83,54 @@ def _sheet_grid_xls(data: bytes) -> dict[str, list[list]]:
         name: [[None if pd.isna(v) else v for v in row] for row in df.itertuples(index=False)]
         for name, df in frames.items()
     }
+
+
+def _read_xlsb(data: bytes) -> tuple[dict[str, list[list]], list[dict]]:
+    """Read a .xlsb workbook via xlsb_reader (openpyxl can't open the binary
+    OOXML format). XlsbWorkbook only takes a path, so the upload is spooled
+    to a temp file. Pivot tables are detected but not recreated as live
+    configs — xlsb_reader doesn't expose pivot cache field names, so the
+    underlying sheet is imported as a plain table instead (see module
+    docstring for the other .xlsb fidelity gaps: no merged-cell fill, dates
+    come back as raw Excel serial numbers)."""
+    fd, path = tempfile.mkstemp(suffix=".xlsb")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        grids: dict[str, list[list]] = {}
+        pivots: list[dict] = []
+        with XlsbWorkbook(path) as wb:
+            for sheet_name, values in wb.iter_values():
+                if not values:
+                    grids[sheet_name] = []
+                    continue
+                max_row = max(r for r, _ in values) + 1
+                max_col = max(c for _, c in values) + 1
+                grid = [[None] * max_col for _ in range(max_row)]
+                for (r, c), v in values.items():
+                    grid[r][c] = v
+                grids[sheet_name] = grid
+            for pt in wb.iter_pivot_tables():
+                pivots.append({
+                    "name": pt.get("name") or "PivotTable",
+                    "sheet": pt.get("sheet"),
+                    "error": "recreating pivot tables from .xlsb files isn't supported yet "
+                             "— the underlying sheet was imported as a table instead",
+                })
+        return grids, pivots
+    finally:
+        os.unlink(path)
+
+
+def _parse_source(filename: str, data: bytes) -> tuple[dict[str, list[list]], list[dict]]:
+    """Dispatch to the right reader by extension and return (grids, pivots)."""
+    name = filename.lower()
+    if name.endswith(".xlsx") or name.endswith(".xlsm"):
+        wb = load_workbook(io.BytesIO(data), data_only=True)
+        return _grids_from_wb(wb), _extract_pivots(wb)
+    if name.endswith(".xlsb"):
+        return _read_xlsb(data)
+    return _sheet_grid_xls(data), []
 
 
 def _is_blank(v) -> bool:
@@ -290,7 +349,9 @@ def data_table_ddl(table_name: str, columns: list[dict]) -> str:
     """
 
 
-def _ingest_sheet(client, workbook_id: str, sheet_name: str, grid: list[list], warnings: list[str]) -> dict | None:
+def _prepare_sheet(sheet_name: str, grid: list[list], warnings: list[str]) -> tuple[list[dict], list[list]] | None:
+    """Header-detect + type-infer a raw grid. Shared by fresh ingestion and
+    by refresh (re-parsing the same sheet from a re-uploaded workbook)."""
     grid = [row for row in grid]
     # drop fully blank leading rows
     while grid and all(_is_blank(v) for v in grid[0]):
@@ -312,6 +373,15 @@ def _ingest_sheet(client, workbook_id: str, sheet_name: str, grid: list[list], w
     columns = _flatten_headers(grid, depth, width)
     for ci, col in enumerate(columns):
         col["type"] = _infer_type([row[ci] for row in body[:2000]])
+    return columns, body
+
+
+def _ingest_sheet(client, workbook_id: str, sheet_name: str, grid: list[list], warnings: list[str]) -> dict | None:
+    prepared = _prepare_sheet(sheet_name, grid, warnings)
+    if prepared is None:
+        return None
+    columns, body = prepared
+    width = len(columns)
 
     sheet_id = uuid.uuid4().hex
     table_name = f"data_{sheet_id}"
@@ -337,14 +407,8 @@ def _ingest_sheet(client, workbook_id: str, sheet_name: str, grid: list[list], w
 
 def ingest_workbook(filename: str, data: bytes) -> dict:
     check_file(filename, data)
-    pivots: list[dict] = []
     try:
-        if filename.lower().endswith(".xlsx"):
-            wb = load_workbook(io.BytesIO(data), data_only=True)
-            grids = _grids_from_wb(wb)
-            pivots = _extract_pivots(wb)
-        else:
-            grids = _sheet_grid_xls(data)
+        grids, pivots = _parse_source(filename, data)
     except IngestError:
         raise
     except Exception as e:  # corrupt / unreadable
@@ -436,5 +500,162 @@ def ingest_workbook(filename: str, data: bytes) -> dict:
         "filename": filename,
         "sheets": sheets_meta,
         "pivots": recreated,
+        "warnings": warnings,
+    }
+
+
+# ---------- refresh (re-upload a source file to replace a workbook's data) ----------
+
+# ALTER TABLE ... UPDATE runs as a background mutation by default; forcing it
+# synchronous keeps the metadata read-your-writes consistent for the
+# frontend, which reloads sheets right after the refresh job finishes.
+_SYNC_MUTATION = {"mutations_sync": "1"}
+
+
+def _tombstone_rows(client, table: str, columns: list[str]) -> None:
+    live = client.query(f"SELECT _row_id, _row_index FROM {table} FINAL WHERE _is_deleted = 0").result_rows
+    if not live:
+        return
+    version = time.time_ns()
+    col_names = ["_row_id", "_row_index", "_version", "_is_deleted"] + columns
+    tombstones = [[rid, ridx, version, 1] + [None] * len(columns) for rid, ridx in live]
+    for start in range(0, len(tombstones), 50000):
+        client.insert(table, tombstones[start:start + 50000], column_names=col_names)
+
+
+def _clear_sheet(client, sheet: dict) -> None:
+    """A previously-ingested sheet is missing from the refreshed file: wipe
+    its rows but keep the sheet/table/pivots in place so nothing breaks."""
+    table = f"{DB}.`{sheet['table_name']}`"
+    _tombstone_rows(client, table, [c["name"] for c in sheet["columns"]])
+    client.command(
+        f"ALTER TABLE {DB}.sheets UPDATE row_count = 0 WHERE id = %(id)s",
+        parameters={"id": sheet["id"]},
+        settings=_SYNC_MUTATION,
+    )
+
+
+def _refresh_sheet(client, sheet: dict, grid: list[list], warnings: list[str]) -> dict | None:
+    """Replace a sheet's data in place: existing rows are tombstoned and the
+    freshly-parsed grid's rows are inserted new. The table/sheet id (and so
+    any pivots built on top) is preserved. Columns are only ever widened —
+    headers no longer present stay in the schema (as all-NULL going forward)
+    rather than risk breaking a pivot config that still references them."""
+    prepared = _prepare_sheet(sheet["sheet_name"], grid, warnings)
+    if prepared is None:
+        return None
+    new_columns, body = prepared
+
+    table = f"{DB}.`{sheet['table_name']}`"
+    old_columns = sheet["columns"]
+    old_names = {c["name"] for c in old_columns}
+    added = [c for c in new_columns if c["name"] not in old_names]
+    for c in added:
+        client.command(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS `{c['name']}` {TYPE_TO_CH[c['type']]}")
+    merged_columns = old_columns + added
+    merged_names = [c["name"] for c in merged_columns]
+    # Existing columns keep coercing to their original (already-persisted)
+    # type even if this refresh's data would infer differently — the
+    # underlying ClickHouse column type never changes for them.
+    type_by_name = {c["name"]: c["type"] for c in new_columns}
+    type_by_name.update({c["name"]: c["type"] for c in old_columns})
+
+    _tombstone_rows(client, table, merged_names)
+
+    new_index_by_name = {c["name"]: i for i, c in enumerate(new_columns)}
+    version = time.time_ns()
+    rows = []
+    for idx, row in enumerate(body):
+        values = []
+        for name in merged_names:
+            ci = new_index_by_name.get(name)
+            values.append(_coerce(row[ci], type_by_name[name]) if ci is not None else None)
+        rows.append([uuid.uuid4().hex, idx, version, 0] + values)
+    if rows:
+        col_names = ["_row_id", "_row_index", "_version", "_is_deleted"] + merged_names
+        for start in range(0, len(rows), 50000):
+            client.insert(table, rows[start:start + 50000], column_names=col_names)
+
+    client.command(
+        f"ALTER TABLE {DB}.sheets UPDATE columns_json = %(cols)s, row_count = %(cnt)s WHERE id = %(id)s",
+        parameters={"cols": json.dumps(merged_columns), "cnt": len(rows), "id": sheet["id"]},
+        settings=_SYNC_MUTATION,
+    )
+    return {"id": sheet["id"], "sheet_name": sheet["sheet_name"], "row_count": len(rows), "columns": merged_columns}
+
+
+def refresh_workbook(workbook_id: str, filename: str, data: bytes) -> dict:
+    """Re-parse a re-uploaded source file and replace the data of a workbook
+    that was already ingested, matching sheets by name. Table/sheet/pivot
+    identities are preserved so existing pivots keep working against the
+    refreshed data."""
+    check_file(filename, data)
+    client = ch()
+    if not client.query(
+        f"SELECT 1 FROM {DB}.workbooks WHERE id = %(id)s", parameters={"id": workbook_id}
+    ).result_rows:
+        raise IngestError("Workbook not found")
+
+    try:
+        grids, pivots = _parse_source(filename, data)
+    except IngestError:
+        raise
+    except Exception as e:  # corrupt / unreadable
+        raise IngestError(f"Could not parse workbook: {e}") from e
+
+    sheets_res = client.query(
+        f"SELECT id, sheet_name, table_name, columns_json FROM {DB}.sheets WHERE workbook_id = %(id)s",
+        parameters={"id": workbook_id},
+    )
+    existing_by_name = {
+        r[1]: {"id": r[0], "sheet_name": r[1], "table_name": r[2], "columns": json.loads(r[3])}
+        for r in sheets_res.result_rows
+    }
+
+    # Same pivot-output detection as fresh ingestion, but only used to skip
+    # newly-appeared pivot-output sheets — a sheet already tracked as a data
+    # table keeps refreshing as one even if it now looks pivot-heavy, and we
+    # never re-run the "recreate embedded pivots" step here (that would spawn
+    # a duplicate live pivot config on every refresh).
+    refs_by_sheet: dict[str, list[str]] = {}
+    for p in pivots:
+        if "error" not in p:
+            refs_by_sheet.setdefault(p["sheet"], []).append(p["ref"])
+    pivot_only = {
+        name for name, refs in refs_by_sheet.items() if _pivot_coverage(grids.get(name, []), refs) >= 0.8
+    }
+
+    warnings: list[str] = []
+    sheets_meta: list[dict] = []
+
+    for sheet_name, grid in grids.items():
+        existing_sheet = existing_by_name.pop(sheet_name, None)
+        if existing_sheet is not None:
+            meta_out = _refresh_sheet(client, existing_sheet, grid, warnings)
+        elif sheet_name in pivot_only:
+            continue
+        else:
+            meta_out = _ingest_sheet(client, workbook_id, sheet_name, grid, warnings)
+            if meta_out:
+                warnings.append(f"Sheet '{sheet_name}' is new — added to the workbook")
+        if meta_out:
+            sheets_meta.append(meta_out)
+
+    # Sheets that existed before but are absent from the refreshed file keep
+    # their table/pivots but lose their data.
+    for sheet_name, existing_sheet in existing_by_name.items():
+        _clear_sheet(client, existing_sheet)
+        warnings.append(f"Sheet '{sheet_name}' was not found in the refreshed file — its data was cleared")
+
+    client.command(
+        f"ALTER TABLE {DB}.workbooks UPDATE refreshed_at = %(now)s WHERE id = %(id)s",
+        parameters={"now": dt.datetime.utcnow(), "id": workbook_id},
+        settings=_SYNC_MUTATION,
+    )
+
+    return {
+        "workbook_id": workbook_id,
+        "filename": filename,
+        "sheets": sheets_meta,
         "warnings": warnings,
     }

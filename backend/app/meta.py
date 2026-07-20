@@ -6,6 +6,17 @@ from fastapi import HTTPException
 from .db import DB, ch
 
 
+def get_workbook(workbook_id: str) -> dict:
+    res = ch().query(
+        f"SELECT id, filename, uploaded_at, refreshed_at FROM {DB}.workbooks WHERE id = %(id)s",
+        parameters={"id": workbook_id},
+    )
+    if not res.result_rows:
+        raise HTTPException(404, "Workbook not found")
+    r = res.result_rows[0]
+    return {"id": r[0], "filename": r[1], "uploaded_at": r[2], "refreshed_at": r[3]}
+
+
 def get_sheet(sheet_id: str) -> dict:
     res = ch().query(
         f"SELECT id, workbook_id, sheet_name, table_name, columns_json FROM {DB}.sheets WHERE id = %(id)s",

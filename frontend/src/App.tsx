@@ -6,6 +6,18 @@ import { PivotView } from './components/PivotView';
 import { TableView } from './components/TableView';
 import { UploadStatusCard, useUpload } from './components/UploadZone';
 
+function timeAgo(iso: string | null): string | null {
+  if (!iso) return null;
+  const stamp = /[zZ]|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`;
+  const s = Math.max(0, Math.floor((Date.now() - new Date(stamp).getTime()) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
 function ThemeToggle() {
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   return (
@@ -31,7 +43,10 @@ export default function App() {
   const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
   const [view, setView] = useState<'raw' | string>('raw'); // 'raw' or a pivot id
   const [search, setSearch] = useState('');
+  const [dataVersion, setDataVersion] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
+  const refreshFileInput = useRef<HTMLInputElement>(null);
+  const refreshTarget = useRef<string | null>(null);
 
   const loadWorkbooks = useCallback(async () => {
     setWorkbooks(await api.workbooks());
@@ -58,6 +73,16 @@ export default function App() {
     await loadWorkbooks();
     await openWorkbook(workbookId);
   });
+
+  const refresh = useUpload(
+    async (workbookId) => {
+      await loadWorkbooks();
+      await loadSheets(workbookId);
+      setDataVersion((v) => v + 1);
+    },
+    (file) => api.refreshWorkbook(refreshTarget.current!, file),
+    'Refreshing'
+  );
 
   const sheets = activeWb ? (sheetsByWb[activeWb] ?? []) : [];
   const activeSheet = sheets.find((s) => s.id === activeSheetId) ?? null;
@@ -117,12 +142,12 @@ export default function App() {
           <input placeholder="Search files…" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
         <button className="pv-btn-primary" onClick={() => fileInput.current?.click()}>
-          Upload .xlsx
+          Upload
         </button>
         <input
           ref={fileInput}
           type="file"
-          accept=".xlsx,.xls"
+          accept=".xlsx,.xlsm,.xls,.xlsb"
           style={{ display: 'none' }}
           onChange={(e) => {
             const f = e.target.files?.[0];
@@ -133,35 +158,61 @@ export default function App() {
         <ThemeToggle />
       </div>
 
+      <input
+        ref={refreshFileInput}
+        type="file"
+        accept=".xlsx,.xlsm,.xls,.xlsb"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void refresh.start(f);
+          e.target.value = '';
+        }}
+      />
+
       <div className="pv-body">
         {/* sidebar: files */}
         <div className="pv-sidebar">
           <div className="pv-side-label">Files · {workbooks.length}</div>
           {filtered.length === 0 && (
             <div style={{ padding: '4px 14px', fontSize: 11, color: 'var(--pv-muted)' }}>
-              {workbooks.length === 0 ? 'Drop an .xlsx anywhere, or use Upload.' : 'No matches.'}
+              {workbooks.length === 0 ? 'Drop a workbook anywhere, or use Upload.' : 'No matches.'}
             </div>
           )}
           {filtered.map((wb) => {
             const active = wb.id === activeWb;
             const wbSheets = sheetsByWb[wb.id];
+            const refreshedLabel = timeAgo(wb.refreshed_at);
             return (
               <div key={wb.id} className={`pv-file${active ? ' active' : ''}`} onClick={() => void openWorkbook(wb.id)}>
                 <span className="pv-file-icon">▦</span>
-                <div style={{ minWidth: 0 }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
                   <div className="pv-file-name">{wb.filename}</div>
                   {active && wbSheets && (
                     <div className="pv-file-sub">
                       {wbSheets.length} sheet{wbSheets.length === 1 ? '' : 's'} ·{' '}
                       {wbSheets.reduce((n, s) => n + s.row_count, 0).toLocaleString()} rows
+                      {refreshedLabel && <> · refreshed {refreshedLabel}</>}
                     </div>
                   )}
                 </div>
+                <span
+                  className="pv-file-refresh"
+                  title={refreshedLabel ? `Refresh data (last refreshed ${refreshedLabel})` : 'Refresh data from a re-uploaded file'}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    refreshTarget.current = wb.id;
+                    refreshFileInput.current?.click();
+                  }}
+                >
+                  ⟳
+                </span>
               </div>
             );
           })}
           <div style={{ flex: 1 }} />
           <UploadStatusCard status={upload.status} onDismiss={upload.dismiss} />
+          <UploadStatusCard status={refresh.status} onDismiss={refresh.dismiss} />
         </div>
 
         {/* main workspace */}
@@ -219,10 +270,10 @@ export default function App() {
               </div>
 
               {view === 'raw' ? (
-                <TableView key={activeSheet.id} sheet={activeSheet} />
+                <TableView key={`${activeSheet.id}-${dataVersion}`} sheet={activeSheet} />
               ) : (
                 <PivotView
-                  key={view}
+                  key={`${view}-${dataVersion}`}
                   sheet={activeSheet}
                   pivotId={view}
                   onRenamed={(name) => renamePivotInTree(view, name)}

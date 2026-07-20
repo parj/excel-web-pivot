@@ -10,14 +10,18 @@ export type UploadStatus =
   | { kind: 'error'; message: string }
   | { kind: 'done'; warnings: string[] };
 
-/** Upload + ingestion-job polling, shared by the top-bar button and drag-drop. */
-export function useUpload(onUploaded: (workbookId: string) => void) {
+/** Upload + ingestion-job polling, shared by the top-bar button, drag-drop, and per-file refresh. */
+export function useUpload(
+  onUploaded: (workbookId: string) => void,
+  uploadFn: (file: File) => Promise<{ job_id: string }> = api.upload,
+  workingVerb = 'Ingesting'
+) {
   const [status, setStatus] = useState<UploadStatus>({ kind: 'idle' });
   const pollRef = useRef<number | null>(null);
 
   const start = async (file: File) => {
-    if (!/\.(xlsx|xls)$/i.test(file.name)) {
-      setStatus({ kind: 'error', message: `"${file.name}" is not an .xlsx / .xls file` });
+    if (!/\.(xlsx|xlsm|xls|xlsb)$/i.test(file.name)) {
+      setStatus({ kind: 'error', message: `"${file.name}" is not an .xlsx / .xlsm / .xls / .xlsb file` });
       return;
     }
     if (file.size > MAX_MB * 1024 * 1024) {
@@ -26,8 +30,8 @@ export function useUpload(onUploaded: (workbookId: string) => void) {
     }
     setStatus({ kind: 'working', label: `Uploading ${file.name}…` });
     try {
-      const { job_id } = await api.upload(file);
-      setStatus({ kind: 'working', label: `Ingesting ${file.name}…` });
+      const { job_id } = await uploadFn(file);
+      setStatus({ kind: 'working', label: `${workingVerb} ${file.name}…` });
       pollRef.current = window.setInterval(async () => {
         try {
           const job = await api.job(job_id);

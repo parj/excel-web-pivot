@@ -36,12 +36,25 @@ def job_status(job_id: str):
     return job
 
 
+@router.post("/workbooks/{workbook_id}/refresh", status_code=202,
+             summary="Re-upload a workbook's source file to refresh its data (async job)")
+async def refresh_workbook(workbook_id: str, file: UploadFile):
+    meta.get_workbook(workbook_id)
+    data = await file.read()
+    try:
+        check_file(file.filename or "upload.xlsx", data)
+    except IngestError as e:
+        raise HTTPException(413 if "limit" in str(e) else 400, str(e))
+    job_id = jobs.start_refresh(workbook_id, file.filename or "upload.xlsx", data)
+    return {"job_id": job_id}
+
+
 # ---------- workbooks / sheets ----------
 
 @router.get("/workbooks", summary="List uploaded workbooks")
 def list_workbooks():
-    res = ch().query(f"SELECT id, filename, uploaded_at FROM {DB}.workbooks ORDER BY uploaded_at DESC")
-    return [{"id": r[0], "filename": r[1], "uploaded_at": r[2]} for r in res.result_rows]
+    res = ch().query(f"SELECT id, filename, uploaded_at, refreshed_at FROM {DB}.workbooks ORDER BY uploaded_at DESC")
+    return [{"id": r[0], "filename": r[1], "uploaded_at": r[2], "refreshed_at": r[3]} for r in res.result_rows]
 
 
 @router.get("/workbooks/{workbook_id}/sheets", summary="List sheets (and their saved pivots) for a workbook")

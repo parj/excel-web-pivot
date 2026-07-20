@@ -49,6 +49,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "xlrd" },
+    { name = "xlsb-reader" },
 ]
 
 [package.metadata]
@@ -60,6 +61,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29" },
     { name = "xlrd", specifier = ">=2.0.1" },
+    { name = "xlsb-reader", specifier = ">=0.3.0" },
 ]
 
 [[package]]
@@ -588,6 +590,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/07/5a/377161c2d3538d1990d7af382c79f3b2372e880b65de21b01b1a2b78691e/xlrd-2.0.2.tar.gz", hash = "sha256:08b5e25de58f21ce71dc7db3b3b8106c1fa776f3024c54e45b45b374e89234c9", size = 100167, upload-time = "2025-06-14T08:46:39.039Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1a/62/c8d562e7766786ba6587d09c5a8ba9f718ed3fa8af7f4553e8f91c36f302/xlrd-2.0.2-py2.py3-none-any.whl", hash = "sha256:ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9", size = 96555, upload-time = "2025-06-14T08:46:37.766Z" },
+]
+
+[[package]]
+name = "xlsb-reader"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3b/be/b3561f55586cfe5ab89ae1c60a0b5f0f93133885635c22fae39635541451/xlsb_reader-0.3.0.tar.gz", hash = "sha256:6e0f2d51928d8d2c004927ebfd37c8caeca43ce30c393da8fd57a29e9ddace32", size = 219925, upload-time = "2026-04-11T11:11:11.698Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8f/ce/857c3de78bf4d0b18f69187a04fb8898cd03d6bd1c3db896bdfaa1c666e2/xlsb_reader-0.3.0-py3-none-any.whl", hash = "sha256:2f0af4c4919513aff8add1e2a79038b82ad01ce20064841c6f6d10bb4365f9b0", size = 34738, upload-time = "2026-04-11T11:11:10.28Z" },
 ]
 
 [[package]]

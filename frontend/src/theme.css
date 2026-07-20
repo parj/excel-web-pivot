@@ -101,6 +101,12 @@ body {
 .pv-file.active .pv-file-icon { color: var(--pv-accent); }
 .pv-file.active .pv-file-name { font-weight: 600; color: var(--pv-text); }
 .pv-file-sub { font-size: 10px; color: var(--pv-muted); margin-top: 1px; }
+.pv-file-refresh {
+  flex-shrink: 0; color: var(--pv-faint); font-size: 13px; line-height: 1; padding: 2px 4px;
+  border-radius: 4px; opacity: 0; transition: opacity 0.1s;
+}
+.pv-file:hover .pv-file-refresh, .pv-file.active .pv-file-refresh { opacity: 1; }
+.pv-file-refresh:hover { color: var(--pv-accent); background: var(--pv-hover); }
 
 /* ---------- main ---------- */
 .pv-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }

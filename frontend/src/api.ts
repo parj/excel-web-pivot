@@ -8,6 +8,7 @@ export interface Workbook {
   id: string;
   filename: string;
   uploaded_at: string;
+  refreshed_at: string | null;
 }
 
 export interface PivotRef {
@@ -105,6 +106,11 @@ export const api = {
     const form = new FormData();
     form.append('file', file);
     return req('/api/uploads', { method: 'POST', body: form });
+  },
+  refreshWorkbook(workbookId: string, file: File): Promise<{ job_id: string }> {
+    const form = new FormData();
+    form.append('file', file);
+    return req(`/api/workbooks/${workbookId}/refresh`, { method: 'POST', body: form });
   },
   job: (id: string) => req<Job>(`/api/jobs/${id}`),
   workbooks: () => req<Workbook[]>('/api/workbooks'),

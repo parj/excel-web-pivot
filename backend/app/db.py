@@ -35,9 +35,12 @@ DDL_STATEMENTS = [
     CREATE TABLE IF NOT EXISTS {DB}.workbooks (
         id String,
         filename String,
-        uploaded_at DateTime DEFAULT now()
+        uploaded_at DateTime DEFAULT now(),
+        refreshed_at Nullable(DateTime)
     ) ENGINE = MergeTree ORDER BY id
     """,
+    # Added after the initial release — idempotent for already-created tables.
+    f"ALTER TABLE {DB}.workbooks ADD COLUMN IF NOT EXISTS refreshed_at Nullable(DateTime)",
     f"""
     CREATE TABLE IF NOT EXISTS {DB}.sheets (
         id String,
