@@ -1,10 +1,13 @@
-FROM node:20-alpine
+FROM ghcr.io/pnpm/pnpm:11 AS builder
+
+RUN pnpm runtime set node 24 -g
 
 WORKDIR /app
-COPY package.json ./
-RUN npm install
 
 COPY . .
 
+RUN pnpm install
+
 EXPOSE 5173
-CMD ["npm", "run", "dev"]
+
+CMD ["pnpm", "run", "dev"]
